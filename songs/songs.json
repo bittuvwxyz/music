@@ -1,0 +1,52 @@
+﻿[
+    {
+        "id":  "offline_1",
+        "title":  "Morning Coffee",
+        "artist":  "Acoustic Breeze",
+        "album":  "Local Music",
+        "filename":  "Acoustic Breeze - Morning Coffee.wav",
+        "url":  "songs/Acoustic Breeze - Morning Coffee.wav",
+        "format":  "wav",
+        "size":  2822444
+    },
+    {
+        "id":  "offline_2",
+        "title":  "Sunset Reverie",
+        "artist":  "Lofi Study",
+        "album":  "Local Music",
+        "filename":  "Lofi Study - Sunset Reverie.wav",
+        "url":  "songs/Lofi Study - Sunset Reverie.wav",
+        "format":  "wav",
+        "size":  2822444
+    },
+    {
+        "id":  "offline_3",
+        "title":  "master",
+        "artist":  "Offline Artist",
+        "album":  "Local Music",
+        "filename":  "master.mp3",
+        "url":  "songs/master.mp3",
+        "format":  "mp3",
+        "size":  3693673
+    },
+    {
+        "id":  "offline_4",
+        "title":  "Synthwave Dream",
+        "artist":  "Midnight City",
+        "album":  "Local Music",
+        "filename":  "Midnight City - Synthwave Dream.wav",
+        "url":  "songs/Midnight City - Synthwave Dream.wav",
+        "format":  "wav",
+        "size":  1764044
+    },
+    {
+        "id":  "offline_5",
+        "title":  "Cyber Romance",
+        "artist":  "Neon Drive",
+        "album":  "Local Music",
+        "filename":  "Neon Drive - Cyber Romance.wav",
+        "url":  "songs/Neon Drive - Cyber Romance.wav",
+        "format":  "wav",
+        "size":  2822444
+    }
+]
