@@ -1,5 +1,7 @@
 /**
  * Core Audio Player Engine with Web Audio API, Equalizer, Queue, & MediaSession
+ * Highly resilient, handles rapid track switching, buffering, autoplay restrictions,
+ * touch-friendly seeking, and device media session integration.
  */
 
 class AudioPlayer {
@@ -20,12 +22,14 @@ class AudioPlayer {
         this.originalQueue = [];
         this.currentIndex = -1;
         this.isPlaying = false;
+        this.isBuffering = false;
         this.isMuted = false;
         this.volume = StorageManager.getSetting('volume', 0.8);
         this.playbackRate = StorageManager.getSetting('playback_rate', 1.0);
         this.repeatMode = StorageManager.getSetting('repeat', 'off'); // 'off', 'all', 'one'
         this.isShuffled = StorageManager.getSetting('shuffle', false);
         this.currentBlobUrl = null;
+        this.loadRequestId = 0;
 
         // Enhanced Audio Features
         this.pannerNode = null;
@@ -46,11 +50,14 @@ class AudioPlayer {
         // Callbacks
         this.onTrackChange = null;
         this.onPlayStateChange = null;
+        this.onBufferingChange = null;
         this.onTimeUpdate = null;
+        this.onDurationChange = null;
         this.onQueueUpdate = null;
         this.onVolumeChange = null;
         this.onSleepTimerTick = null;
         this.onABLoopChange = null;
+        this.onError = null;
 
         this.initAudioEvents();
         this.initMediaSession();
@@ -61,11 +68,13 @@ class AudioPlayer {
     initAudioContext() {
         if (this.isAudioCtxInitialized) return;
         try {
-            const AudioContext = window.AudioContext || window.webkitAudioContext;
-            this.audioCtx = new AudioContext();
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextClass) return;
 
+            this.audioCtx = new AudioContextClass();
             this.sourceNode = this.audioCtx.createMediaElementSource(this.audio);
             this.analyserNode = this.audioCtx.createAnalyser();
+            this.analyserNode.fftSize = 256;
 
             // 5-band EQ: 60Hz (Lowshelf), 250Hz (Peaking), 1000Hz (Peaking), 4000Hz (Peaking), 14000Hz (Highshelf)
             const frequencies = [60, 250, 1000, 4000, 14000];
@@ -91,7 +100,7 @@ class AudioPlayer {
 
             lastNode.connect(this.analyserNode);
 
-            // Bass Booster Node (60Hz shelf)
+            // Bass Booster Node (lowshelf at 80Hz)
             this.bassBoostNode = this.audioCtx.createBiquadFilter();
             this.bassBoostNode.type = 'lowshelf';
             this.bassBoostNode.frequency.value = 80;
@@ -99,7 +108,7 @@ class AudioPlayer {
             this.analyserNode.connect(this.bassBoostNode);
 
             // Stereo Panner Node
-            if (this.audioCtx.createStereoPanner) {
+            if (typeof this.audioCtx.createStereoPanner === 'function') {
                 this.pannerNode = this.audioCtx.createStereoPanner();
                 this.pannerNode.pan.value = this.stereoPan;
                 this.bassBoostNode.connect(this.pannerNode);
@@ -114,19 +123,62 @@ class AudioPlayer {
             const savedEq = StorageManager.getSetting('eq_gains', [0, 0, 0, 0, 0]);
             this.setEqualizerGains(savedEq);
         } catch (e) {
-            console.warn('Web Audio API initialization failed:', e);
+            console.warn('Web Audio API initialization failed (fallback to standard audio):', e);
+        }
+    }
+
+    async ensureAudioContext() {
+        if (!this.isAudioCtxInitialized) {
+            this.initAudioContext();
+        }
+        if (this.audioCtx && this.audioCtx.state === 'suspended') {
+            try {
+                await this.audioCtx.resume();
+            } catch (err) {
+                console.warn('AudioContext resume was prevented:', err);
+            }
         }
     }
 
     initAudioEvents() {
         this.audio.addEventListener('play', () => {
             this.isPlaying = true;
+            this.isBuffering = false;
+            if (this.onBufferingChange) this.onBufferingChange(false);
+            if (this.onPlayStateChange) this.onPlayStateChange(true);
+        });
+
+        this.audio.addEventListener('playing', () => {
+            this.isPlaying = true;
+            this.isBuffering = false;
+            if (this.onBufferingChange) this.onBufferingChange(false);
             if (this.onPlayStateChange) this.onPlayStateChange(true);
         });
 
         this.audio.addEventListener('pause', () => {
             this.isPlaying = false;
+            this.isBuffering = false;
+            if (this.onBufferingChange) this.onBufferingChange(false);
             if (this.onPlayStateChange) this.onPlayStateChange(false);
+        });
+
+        this.audio.addEventListener('waiting', () => {
+            this.isBuffering = true;
+            if (this.onBufferingChange) this.onBufferingChange(true);
+        });
+
+        this.audio.addEventListener('canplay', () => {
+            this.isBuffering = false;
+            if (this.onBufferingChange) this.onBufferingChange(false);
+        });
+
+        this.audio.addEventListener('loadedmetadata', () => {
+            const dur = Number.isFinite(this.audio.duration) ? this.audio.duration : 0;
+            if (this.currentTrack && dur > 0) {
+                this.currentTrack.duration = dur;
+            }
+            if (this.onDurationChange) this.onDurationChange(dur);
+            if (this.onTimeUpdate) this.onTimeUpdate(this.audio.currentTime || 0, dur);
         });
 
         this.audio.addEventListener('timeupdate', () => {
@@ -138,7 +190,8 @@ class AudioPlayer {
             }
 
             if (this.onTimeUpdate) {
-                this.onTimeUpdate(this.audio.currentTime, this.audio.duration || 0);
+                const dur = Number.isFinite(this.audio.duration) ? this.audio.duration : (this.currentTrack?.duration || 0);
+                this.onTimeUpdate(this.audio.currentTime || 0, dur);
             }
         });
 
@@ -146,23 +199,39 @@ class AudioPlayer {
             if (this.stopAtTrackEnd) {
                 this.stopAtTrackEnd = false;
                 this.pause();
-                if (this.onSleepTimerTick) this.onSleepTimerTick(0, 'Timer finished: stopped at track end.');
+                if (this.onSleepTimerTick) this.onSleepTimerTick(0, 'Timer finished');
                 return;
             }
             this.handleTrackEnded();
         });
 
-        this.audio.addEventListener('error', (e) => {
-            console.error('Audio playback error:', e);
-            if (this.queue.length > 1) {
-                // Skip to next if current track has decoding/loading error
-                setTimeout(() => this.next(), 1000);
+        this.audio.addEventListener('error', () => {
+            this.isPlaying = false;
+            this.isBuffering = false;
+            if (this.onBufferingChange) this.onBufferingChange(false);
+            if (this.onPlayStateChange) this.onPlayStateChange(false);
+
+            const err = this.audio.error;
+            let message = 'Audio loading error';
+            if (err) {
+                if (err.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+                    message = 'Format not supported or file missing.';
+                } else if (err.code === MediaError.MEDIA_ERR_NETWORK) {
+                    message = 'Network error while loading file.';
+                } else if (err.code === MediaError.MEDIA_ERR_DECODE) {
+                    message = 'Decoding error occurred.';
+                }
+            }
+            console.warn(`Playback error for "${this.currentTrack?.title}": ${message}`);
+            if (this.onError) {
+                this.onError(new Error(message), this.currentTrack);
             }
         });
     }
 
     initMediaSession() {
-        if ('mediaSession' in navigator) {
+        if (!('mediaSession' in navigator)) return;
+        try {
             navigator.mediaSession.setActionHandler('play', () => this.play());
             navigator.mediaSession.setActionHandler('pause', () => this.pause());
             navigator.mediaSession.setActionHandler('previoustrack', () => this.previous());
@@ -170,26 +239,38 @@ class AudioPlayer {
             navigator.mediaSession.setActionHandler('seekto', (details) => {
                 if (details.seekTime !== undefined) this.seek(details.seekTime);
             });
+            navigator.mediaSession.setActionHandler('seekforward', () => {
+                this.seek(this.audio.currentTime + 10);
+            });
+            navigator.mediaSession.setActionHandler('seekbackward', () => {
+                this.seek(this.audio.currentTime - 10);
+            });
+        } catch (e) {
+            console.warn('MediaSession handler error:', e);
         }
     }
 
     updateMediaSession() {
         if (!('mediaSession' in navigator) || !this.currentTrack) return;
-        navigator.mediaSession.metadata = new MediaMetadata({
-            title: this.currentTrack.title || 'Unknown Title',
-            artist: this.currentTrack.artist || 'Local Artist',
-            album: this.currentTrack.album || 'Offline Library',
-            artwork: [
-                { src: this.currentTrack.coverArt || '', sizes: '512x512', type: 'image/png' }
-            ]
-        });
+        try {
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: this.currentTrack.title || 'Unknown Title',
+                artist: this.currentTrack.artist || 'Local Artist',
+                album: this.currentTrack.album || 'Local Music',
+                artwork: [
+                    { src: this.currentTrack.coverArt || '', sizes: '512x512', type: 'image/png' }
+                ]
+            });
+        } catch (e) {
+            console.warn('MediaSession metadata error:', e);
+        }
     }
 
     setQueue(tracks, startIndex = 0) {
-        if (!tracks || tracks.length === 0) return;
+        if (!Array.isArray(tracks) || tracks.length === 0) return;
         this.originalQueue = [...tracks];
         if (this.isShuffled) {
-            const current = tracks[startIndex];
+            const current = tracks[startIndex] || tracks[0];
             const remaining = tracks.filter((_, i) => i !== startIndex);
             this.queue = [current, ...this.shuffleArray(remaining)];
             this.currentIndex = 0;
@@ -204,13 +285,23 @@ class AudioPlayer {
 
     async loadTrack(index, autoPlay = true) {
         if (index < 0 || index >= this.queue.length) return;
+        const requestId = ++this.loadRequestId;
         this.currentIndex = index;
         const track = this.queue[index];
         this.currentTrack = track;
 
+        // Reset A-B looper on song switch
+        if (this.isLoopingAB) {
+            this.clearLoopAB();
+        }
+
         // Cleanup old blob URL
         if (this.currentBlobUrl) {
-            URL.revokeObjectURL(this.currentBlobUrl);
+            try {
+                URL.revokeObjectURL(this.currentBlobUrl);
+            } catch (e) {
+                // ignore
+            }
             this.currentBlobUrl = null;
         }
 
@@ -222,13 +313,27 @@ class AudioPlayer {
             audioSource = this.currentBlobUrl;
         } else if (!track.url || track.url.startsWith('blob:')) {
             const blob = await StorageManager.getFileBlob(track.id);
+            // Race condition check: if another track was requested while waiting, abort
+            if (this.loadRequestId !== requestId) return;
+
             if (blob) {
                 this.currentBlobUrl = URL.createObjectURL(blob);
                 audioSource = this.currentBlobUrl;
             }
         }
 
+        // Final race condition verification
+        if (this.loadRequestId !== requestId) return;
+
+        // Pause previous audio cleanly before swapping src
+        try {
+            this.audio.pause();
+        } catch (e) {
+            // ignore
+        }
+
         this.audio.src = audioSource;
+        this.audio.playbackRate = this.playbackRate;
         this.updateMediaSession();
         StorageManager.addRecentlyPlayed(track.id);
 
@@ -240,12 +345,7 @@ class AudioPlayer {
     }
 
     async play() {
-        if (!this.isAudioCtxInitialized) {
-            this.initAudioContext();
-        }
-        if (this.audioCtx && this.audioCtx.state === 'suspended') {
-            await this.audioCtx.resume();
-        }
+        await this.ensureAudioContext();
 
         if (!this.audio.src && this.queue.length > 0) {
             await this.loadTrack(0, true);
@@ -255,12 +355,21 @@ class AudioPlayer {
         try {
             await this.audio.play();
         } catch (err) {
-            console.warn('Playback failed or blocked:', err);
+            if (err.name !== 'AbortError') {
+                console.warn('Playback request prevented or interrupted:', err);
+                this.isPlaying = false;
+                if (this.onPlayStateChange) this.onPlayStateChange(false);
+                if (this.onError) this.onError(err, this.currentTrack);
+            }
         }
     }
 
     pause() {
-        this.audio.pause();
+        try {
+            this.audio.pause();
+        } catch (e) {
+            // ignore
+        }
     }
 
     togglePlay() {
@@ -293,7 +402,7 @@ class AudioPlayer {
     previous() {
         if (this.queue.length === 0) return;
 
-        // If played more than 3 seconds, replay current song first
+        // If played more than 3 seconds, restart current track first
         if (this.audio.currentTime > 3) {
             this.seek(0);
             return;
@@ -307,13 +416,30 @@ class AudioPlayer {
     }
 
     seek(seconds) {
-        if (this.audio.duration) {
-            this.audio.currentTime = Math.max(0, Math.min(seconds, this.audio.duration));
+        if (!Number.isFinite(seconds)) return;
+        const dur = Number.isFinite(this.audio.duration) && this.audio.duration > 0
+            ? this.audio.duration
+            : (this.currentTrack?.duration || 0);
+
+        if (dur > 0) {
+            const clamped = Math.max(0, Math.min(seconds, dur));
+            try {
+                this.audio.currentTime = clamped;
+            } catch (err) {
+                console.warn('Seek error:', err);
+            }
         }
     }
 
     setVolume(value) {
+        if (!Number.isFinite(value)) return;
         this.volume = Math.max(0, Math.min(1, value));
+
+        // If user manually turns volume up, auto-unmute
+        if (this.isMuted && this.volume > 0) {
+            this.isMuted = false;
+        }
+
         this.audio.volume = this.isMuted ? 0 : this.volume;
         StorageManager.setSetting('volume', this.volume);
         if (this.onVolumeChange) this.onVolumeChange(this.volume, this.isMuted);
@@ -323,13 +449,14 @@ class AudioPlayer {
         this.isMuted = !this.isMuted;
         this.audio.volume = this.isMuted ? 0 : this.volume;
         if (this.onVolumeChange) this.onVolumeChange(this.volume, this.isMuted);
+        return this.isMuted;
     }
 
     toggleShuffle() {
         this.isShuffled = !this.isShuffled;
         StorageManager.setSetting('shuffle', this.isShuffled);
 
-        if (this.queue.length <= 1) return;
+        if (this.queue.length <= 1) return this.isShuffled;
 
         const currentTrack = this.queue[this.currentIndex];
 
@@ -344,6 +471,7 @@ class AudioPlayer {
         }
 
         if (this.onQueueUpdate) this.onQueueUpdate(this.queue, this.currentIndex);
+        return this.isShuffled;
     }
 
     toggleRepeat() {
@@ -377,7 +505,7 @@ class AudioPlayer {
 
     // Equalizer
     setEqualizerGains(gains) {
-        if (!this.eqNodes || this.eqNodes.length === 0) return;
+        if (!this.eqNodes || this.eqNodes.length === 0 || !Array.isArray(gains)) return;
         gains.forEach((gainVal, idx) => {
             if (this.eqNodes[idx]) {
                 this.eqNodes[idx].gain.value = gainVal;
@@ -388,6 +516,7 @@ class AudioPlayer {
 
     // Add track to up next queue
     addToQueue(track) {
+        if (!track) return;
         this.queue.push(track);
         this.originalQueue.push(track);
         if (this.onQueueUpdate) this.onQueueUpdate(this.queue, this.currentIndex);
@@ -395,7 +524,7 @@ class AudioPlayer {
 
     // Remove from queue
     removeFromQueue(index) {
-        if (index === this.currentIndex) return;
+        if (index === this.currentIndex || index < 0 || index >= this.queue.length) return;
         this.queue.splice(index, 1);
         if (index < this.currentIndex) this.currentIndex--;
         if (this.onQueueUpdate) this.onQueueUpdate(this.queue, this.currentIndex);
@@ -403,6 +532,7 @@ class AudioPlayer {
 
     // Playback Speed
     setPlaybackRate(rate) {
+        if (!Number.isFinite(rate)) return;
         this.playbackRate = Math.max(0.25, Math.min(3.0, rate));
         this.audio.playbackRate = this.playbackRate;
         StorageManager.setSetting('playback_rate', this.playbackRate);
@@ -410,8 +540,9 @@ class AudioPlayer {
 
     // Stereo Spatial Pan
     setStereoPan(pan) {
+        if (!Number.isFinite(pan)) return;
         this.stereoPan = Math.max(-1, Math.min(1, pan));
-        if (this.pannerNode) {
+        if (this.pannerNode && this.pannerNode.pan) {
             this.pannerNode.pan.value = this.stereoPan;
         }
     }
@@ -463,7 +594,10 @@ class AudioPlayer {
             return;
         }
 
-        const durationMs = minutes * 60 * 1000;
+        const mins = Number(minutes);
+        if (!Number.isFinite(mins) || mins <= 0) return;
+
+        const durationMs = mins * 60 * 1000;
         this.sleepTargetTime = Date.now() + durationMs;
         const initialVolume = this.volume;
 

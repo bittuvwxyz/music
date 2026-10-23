@@ -19,6 +19,10 @@ class SongPlayerApp {
         this.rightPaneTab = 'now-playing'; // 'now-playing', 'queue', 'lyrics'
         this.isRightPaneOpen = false;
 
+        // Scrubbing state flags to prevent UI jitter
+        this.isSeeking = false;
+        this.isVolSeeking = false;
+
         // Synced lyrics cache
         this.currentSyncedLyrics = null; // array of { time: seconds, text: string }
 
@@ -231,6 +235,7 @@ class SongPlayerApp {
             if (isPlaying) {
                 playIcon.innerHTML = '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>';
                 playBtn.title = 'Pause';
+                playBtn.setAttribute('aria-label', 'Pause');
                 if (this.player.analyserNode) {
                     this.visualizer.connect(this.player.analyserNode);
                     this.visualizer.start();
@@ -238,8 +243,24 @@ class SongPlayerApp {
             } else {
                 playIcon.innerHTML = '<path d="M8 5v14l11-7z"/>';
                 playBtn.title = 'Play';
+                playBtn.setAttribute('aria-label', 'Play');
                 this.visualizer.stop();
             }
+        };
+
+        this.player.onBufferingChange = (isBuffering) => {
+            if (playBtn) {
+                playBtn.classList.toggle('buffering', isBuffering);
+                if (isBuffering) {
+                    playBtn.title = 'Buffering...';
+                } else {
+                    playBtn.title = this.player.isPlaying ? 'Pause' : 'Play';
+                }
+            }
+        };
+
+        this.player.onError = (err) => {
+            this.showToast(`⚠️ Audio error: ${err.message || 'Playback failed'}`);
         };
 
         this.player.onTrackChange = (track) => {
@@ -252,13 +273,27 @@ class SongPlayerApp {
             const timeCurrent = document.getElementById('timeCurrent');
             const timeTotal = document.getElementById('timeTotal');
             const seekProgress = document.getElementById('seekProgress');
+            const seekSlider = document.getElementById('seekSlider');
+            const mobProgress = document.getElementById('mobileProgressBar');
 
-            if (timeCurrent) timeCurrent.textContent = this.formatTime(currentTime);
             if (timeTotal && duration) timeTotal.textContent = this.formatTime(duration);
 
-            if (seekProgress && duration > 0) {
-                const percent = (currentTime / duration) * 100;
-                seekProgress.style.width = `${percent}%`;
+            if (!this.isSeeking) {
+                if (timeCurrent) timeCurrent.textContent = this.formatTime(currentTime);
+
+                if (duration > 0) {
+                    const percent = (currentTime / duration) * 100;
+                    if (seekProgress) seekProgress.style.width = `${percent}%`;
+                    if (mobProgress) mobProgress.style.width = `${percent}%`;
+                    if (seekSlider) {
+                        seekSlider.setAttribute('aria-valuenow', Math.round(currentTime));
+                        seekSlider.setAttribute('aria-valuemax', Math.round(duration));
+                        seekSlider.setAttribute('aria-valuetext', `${this.formatTime(currentTime)} of ${this.formatTime(duration)}`);
+                    }
+                } else {
+                    if (seekProgress) seekProgress.style.width = '0%';
+                    if (mobProgress) mobProgress.style.width = '0%';
+                }
             }
 
             // Synced lyrics highlighting
@@ -269,10 +304,17 @@ class SongPlayerApp {
 
         this.player.onVolumeChange = (vol, isMuted) => {
             const volProgress = document.getElementById('volumeProgress');
+            const volumeSlider = document.getElementById('volumeSlider');
             const volIcon = document.getElementById('volumeIconSvg');
 
-            if (volProgress) {
-                volProgress.style.width = `${isMuted ? 0 : vol * 100}%`;
+            const effectiveVol = isMuted ? 0 : vol;
+            if (volProgress && !this.isVolSeeking) {
+                volProgress.style.width = `${effectiveVol * 100}%`;
+            }
+
+            if (volumeSlider) {
+                volumeSlider.setAttribute('aria-valuenow', Math.round(effectiveVol * 100));
+                volumeSlider.setAttribute('aria-valuetext', `${Math.round(effectiveVol * 100)}% volume`);
             }
 
             if (volIcon) {
@@ -478,6 +520,15 @@ class SongPlayerApp {
         navSearch.addEventListener('click', () => this.switchView('search'));
         navLibrary.addEventListener('click', () => this.switchView('library'));
 
+        // Mobile bottom navigation items (< 768px)
+        const mobHome = document.getElementById('mobNavHome');
+        const mobSearch = document.getElementById('mobNavSearch');
+        const mobLibrary = document.getElementById('mobNavLibrary');
+
+        if (mobHome) mobHome.addEventListener('click', () => this.switchView('home'));
+        if (mobSearch) mobSearch.addEventListener('click', () => this.switchView('search'));
+        if (mobLibrary) mobLibrary.addEventListener('click', () => this.switchView('library'));
+
         // History buttons
         const btnBack = document.getElementById('btnHistoryBack');
         const btnFwd = document.getElementById('btnHistoryForward');
@@ -533,9 +584,20 @@ class SongPlayerApp {
         this.currentView = viewName;
 
         // Nav active class
-        document.getElementById('navHome').classList.toggle('active', viewName === 'home');
-        document.getElementById('navSearch').classList.toggle('active', viewName === 'search');
-        document.getElementById('navLibrary').classList.toggle('active', viewName === 'library');
+        const navH = document.getElementById('navHome');
+        const navS = document.getElementById('navSearch');
+        const navL = document.getElementById('navLibrary');
+        if (navH) navH.classList.toggle('active', viewName === 'home');
+        if (navS) navS.classList.toggle('active', viewName === 'search');
+        if (navL) navL.classList.toggle('active', viewName === 'library');
+
+        // Mobile bottom nav active class
+        const mobH = document.getElementById('mobNavHome');
+        const mobS = document.getElementById('mobNavSearch');
+        const mobL = document.getElementById('mobNavLibrary');
+        if (mobH) mobH.classList.toggle('active', viewName === 'home');
+        if (mobS) mobS.classList.toggle('active', viewName === 'search');
+        if (mobL) mobL.classList.toggle('active', viewName === 'library');
 
         // Toggle Top Search input visibility
         const topSearch = document.getElementById('topSearchContainer');
@@ -801,30 +863,30 @@ class SongPlayerApp {
             tr.dataset.trackId = track.id;
 
             tr.innerHTML = `
-                <td class="track-num-cell">
+                <td class="track-num-cell col-num">
                     <span class="row-index">${index + 1}</span>
-                    <button class="row-play-btn" title="Play">
+                    <button class="row-play-btn" title="Play ${track.title}" aria-label="Play ${track.title}">
                         <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                     </button>
                 </td>
-                <td>
+                <td class="col-title">
                     <div class="track-title-cell">
                         <img src="${track.coverArt}" class="track-table-thumb" alt="${track.title}">
-                        <div>
+                        <div class="track-title-meta">
                             <div class="track-meta-title">${track.title}</div>
                             <div class="track-meta-artist">${track.artist}</div>
                         </div>
                     </div>
                 </td>
-                <td>${track.album || 'Local Music'}</td>
-                <td style="text-align: right; font-variant-numeric: tabular-nums;">
+                <td class="col-album">${track.album || 'Local Music'}</td>
+                <td class="col-time" style="text-align: right; font-variant-numeric: tabular-nums;">
                     ${track.duration ? this.formatTime(track.duration) : '--:--'}
                 </td>
-                <td class="track-action-cell" style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
-                    <button class="btn-track-heart ${isLiked ? 'liked' : ''}" title="${isLiked ? 'Remove from Liked' : 'Save to Liked'}">
+                <td class="track-action-cell col-actions" style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
+                    <button class="btn-track-heart ${isLiked ? 'liked' : ''}" title="${isLiked ? 'Remove from Liked' : 'Save to Liked'}" aria-label="${isLiked ? 'Remove from Liked Songs' : 'Save to Liked Songs'}">
                         <svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
                     </button>
-                    <button class="track-options-btn" title="Edit song details & lyrics">
+                    <button class="track-options-btn" title="Edit song details & lyrics" aria-label="Edit song details and lyrics">
                         <svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>
                     </button>
                 </td>
@@ -1179,58 +1241,187 @@ class SongPlayerApp {
             this.showToast(liked ? 'Added to Liked Songs' : 'Removed from Liked Songs');
         });
 
-        // Timeline Seek Scrubber
+        // Timeline Seek Scrubber with Pointer Events & Keyboard Accessibility
         const seekSlider = document.getElementById('seekSlider');
-        let isSeeking = false;
+        const seekProgress = document.getElementById('seekProgress');
+        const mobProgress = document.getElementById('mobileProgressBar');
+        const timeCurrent = document.getElementById('timeCurrent');
+        let seekTargetTime = 0;
 
-        const updateSeek = (e) => {
+        const calculateSeekPos = (clientX) => {
             const rect = seekSlider.getBoundingClientRect();
-            const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            if (this.player.audio.duration) {
-                this.player.seek(pos * this.player.audio.duration);
+            if (rect.width <= 0) return 0;
+            return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        };
+
+        const updateSeekVisual = (pos) => {
+            const duration = this.player.duration || 0;
+            seekTargetTime = pos * duration;
+            const percent = pos * 100;
+            if (seekProgress) seekProgress.style.width = `${percent}%`;
+            if (mobProgress) mobProgress.style.width = `${percent}%`;
+            if (timeCurrent) timeCurrent.textContent = this.formatTime(seekTargetTime);
+            if (seekSlider) {
+                seekSlider.setAttribute('aria-valuenow', Math.round(seekTargetTime));
+                seekSlider.setAttribute('aria-valuetext', `${this.formatTime(seekTargetTime)} of ${this.formatTime(duration)}`);
             }
         };
 
-        seekSlider.addEventListener('mousedown', (e) => {
-            isSeeking = true;
-            updateSeek(e);
+        seekSlider.addEventListener('pointerdown', (e) => {
+            this.isSeeking = true;
+            seekSlider.setPointerCapture(e.pointerId);
+            const pos = calculateSeekPos(e.clientX);
+            updateSeekVisual(pos);
         });
 
-        window.addEventListener('mousemove', (e) => {
-            if (isSeeking) updateSeek(e);
+        seekSlider.addEventListener('pointermove', (e) => {
+            if (!this.isSeeking) return;
+            const pos = calculateSeekPos(e.clientX);
+            updateSeekVisual(pos);
         });
 
-        window.addEventListener('mouseup', () => {
-            isSeeking = false;
+        const finishSeek = (e) => {
+            if (!this.isSeeking) return;
+            const pos = calculateSeekPos(e.clientX);
+            updateSeekVisual(pos);
+            const duration = this.player.duration || 0;
+            if (duration > 0) {
+                this.player.seek(seekTargetTime);
+            }
+            this.isSeeking = false;
+            try {
+                if (seekSlider.hasPointerCapture(e.pointerId)) {
+                    seekSlider.releasePointerCapture(e.pointerId);
+                }
+            } catch (err) {}
+        };
+
+        seekSlider.addEventListener('pointerup', finishSeek);
+        seekSlider.addEventListener('pointercancel', (e) => {
+            this.isSeeking = false;
+            try {
+                if (seekSlider.hasPointerCapture(e.pointerId)) {
+                    seekSlider.releasePointerCapture(e.pointerId);
+                }
+            } catch (err) {}
         });
 
-        // Volume Slider
+        // Seek keyboard accessibility
+        seekSlider.addEventListener('keydown', (e) => {
+            const duration = this.player.duration || 0;
+            if (duration <= 0) return;
+            let handled = false;
+            if (e.key === 'ArrowRight') {
+                this.player.seek(this.player.currentTime + 5);
+                handled = true;
+            } else if (e.key === 'ArrowLeft') {
+                this.player.seek(this.player.currentTime - 5);
+                handled = true;
+            } else if (e.key === 'Home') {
+                this.player.seek(0);
+                handled = true;
+            } else if (e.key === 'End') {
+                this.player.seek(Math.max(0, duration - 1));
+                handled = true;
+            }
+            if (handled) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        });
+
+        // Volume Slider with Pointer Events & Keyboard Accessibility
         const volumeSlider = document.getElementById('volumeSlider');
+        const volProgress = document.getElementById('volumeProgress');
         const btnMute = document.getElementById('btnVolumeMute');
 
         btnMute.addEventListener('click', () => {
             this.player.toggleMute();
         });
 
-        let isVolSeeking = false;
-        const updateVol = (e) => {
+        const calculateVolPos = (clientX) => {
             const rect = volumeSlider.getBoundingClientRect();
-            const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            this.player.setVolume(pos);
+            if (rect.width <= 0) return 0;
+            return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
         };
 
-        volumeSlider.addEventListener('mousedown', (e) => {
-            isVolSeeking = true;
-            updateVol(e);
+        const applyVolumeChange = (pos) => {
+            const clamped = Math.max(0, Math.min(1, pos));
+            this.player.setVolume(clamped);
+            if (volProgress) volProgress.style.width = `${clamped * 100}%`;
+            volumeSlider.setAttribute('aria-valuenow', Math.round(clamped * 100));
+            volumeSlider.setAttribute('aria-valuetext', `${Math.round(clamped * 100)}% volume`);
+        };
+
+        volumeSlider.addEventListener('pointerdown', (e) => {
+            this.isVolSeeking = true;
+            volumeSlider.setPointerCapture(e.pointerId);
+            const pos = calculateVolPos(e.clientX);
+            applyVolumeChange(pos);
         });
 
-        window.addEventListener('mousemove', (e) => {
-            if (isVolSeeking) updateVol(e);
+        volumeSlider.addEventListener('pointermove', (e) => {
+            if (!this.isVolSeeking) return;
+            const pos = calculateVolPos(e.clientX);
+            applyVolumeChange(pos);
         });
 
-        window.addEventListener('mouseup', () => {
-            isVolSeeking = false;
+        const finishVolSeek = (e) => {
+            if (!this.isVolSeeking) return;
+            const pos = calculateVolPos(e.clientX);
+            applyVolumeChange(pos);
+            this.isVolSeeking = false;
+            try {
+                if (volumeSlider.hasPointerCapture(e.pointerId)) {
+                    volumeSlider.releasePointerCapture(e.pointerId);
+                }
+            } catch (err) {}
+        };
+
+        volumeSlider.addEventListener('pointerup', finishVolSeek);
+        volumeSlider.addEventListener('pointercancel', (e) => {
+            this.isVolSeeking = false;
+            try {
+                if (volumeSlider.hasPointerCapture(e.pointerId)) {
+                    volumeSlider.releasePointerCapture(e.pointerId);
+                }
+            } catch (err) {}
         });
+
+        // Volume slider keyboard accessibility
+        volumeSlider.addEventListener('keydown', (e) => {
+            let handled = false;
+            if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+                this.player.setVolume(this.player.volume + 0.05);
+                handled = true;
+            } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+                this.player.setVolume(this.player.volume - 0.05);
+                handled = true;
+            } else if (e.key === 'Home') {
+                this.player.setVolume(0);
+                handled = true;
+            } else if (e.key === 'End') {
+                this.player.setVolume(1.0);
+                handled = true;
+            }
+            if (handled) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        });
+
+        // Mobile Player Left Area Tap to open Fullscreen Modal
+        const playerLeftArea = document.getElementById('playerLeftArea');
+        if (playerLeftArea) {
+            playerLeftArea.addEventListener('click', (e) => {
+                if (e.target.closest('#btnPlayerLike')) return;
+                // On mobile / tablet screens (< 768px), opening fullscreen modal provides full controls
+                if (window.innerWidth < 768) {
+                    const fsModal = document.getElementById('fullscreenModal');
+                    if (fsModal) fsModal.classList.add('active');
+                }
+            });
+        }
 
         // Right pane toggles
         document.getElementById('btnToggleLyrics').addEventListener('click', () => this.toggleRightPane('lyrics'));
