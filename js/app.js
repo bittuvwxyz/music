@@ -205,8 +205,9 @@ class SongPlayerApp {
         this.renderHomeView();
         this.renderSidebarPlaylists();
 
-        // Preload first song into player bar if available
+        // Preload queue and first song into player bar without autoplaying
         if (this.allTracks.length > 0) {
+            this.player.setQueue(this.allTracks, 0, false);
             this.updatePlayerUI(this.allTracks[0], false);
         }
     }
@@ -1218,8 +1219,21 @@ class SongPlayerApp {
             }
         });
 
-        btnNext.addEventListener('click', () => this.player.next());
-        btnPrevious.addEventListener('click', () => this.player.previous());
+        btnNext.addEventListener('click', () => {
+            if (this.player.queue.length === 0 && this.allTracks.length > 0) {
+                this.player.setQueue(this.allTracks, 0, true);
+            } else {
+                this.player.next();
+            }
+        });
+
+        btnPrevious.addEventListener('click', () => {
+            if (this.player.queue.length === 0 && this.allTracks.length > 0) {
+                this.player.setQueue(this.allTracks, 0, true);
+            } else {
+                this.player.previous();
+            }
+        });
 
         btnShuffle.addEventListener('click', () => {
             this.player.toggleShuffle();
@@ -1269,7 +1283,9 @@ class SongPlayerApp {
 
         seekSlider.addEventListener('pointerdown', (e) => {
             this.isSeeking = true;
-            seekSlider.setPointerCapture(e.pointerId);
+            try {
+                seekSlider.setPointerCapture(e.pointerId);
+            } catch (err) {}
             const pos = calculateSeekPos(e.clientX);
             updateSeekVisual(pos);
         });
@@ -1355,7 +1371,9 @@ class SongPlayerApp {
 
         volumeSlider.addEventListener('pointerdown', (e) => {
             this.isVolSeeking = true;
-            volumeSlider.setPointerCapture(e.pointerId);
+            try {
+                volumeSlider.setPointerCapture(e.pointerId);
+            } catch (err) {}
             const pos = calculateVolPos(e.clientX);
             applyVolumeChange(pos);
         });

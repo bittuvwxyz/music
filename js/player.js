@@ -266,7 +266,18 @@ class AudioPlayer {
         }
     }
 
-    setQueue(tracks, startIndex = 0) {
+    get duration() {
+        if (Number.isFinite(this.audio.duration) && this.audio.duration > 0) {
+            return this.audio.duration;
+        }
+        return this.currentTrack?.duration || 0;
+    }
+
+    get currentTime() {
+        return Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : 0;
+    }
+
+    setQueue(tracks, startIndex = 0, autoPlay = true) {
         if (!Array.isArray(tracks) || tracks.length === 0) return;
         this.originalQueue = [...tracks];
         if (this.isShuffled) {
@@ -280,7 +291,7 @@ class AudioPlayer {
         }
 
         if (this.onQueueUpdate) this.onQueueUpdate(this.queue, this.currentIndex);
-        this.loadTrack(this.currentIndex, true);
+        this.loadTrack(this.currentIndex, autoPlay);
     }
 
     async loadTrack(index, autoPlay = true) {
@@ -330,6 +341,11 @@ class AudioPlayer {
             this.audio.pause();
         } catch (e) {
             // ignore
+        }
+
+        // Safely encode relative URLs to handle spaces on hosted web servers
+        if (audioSource && typeof audioSource === 'string' && !audioSource.startsWith('blob:') && !audioSource.startsWith('data:')) {
+            audioSource = encodeURI(decodeURI(audioSource));
         }
 
         this.audio.src = audioSource;
